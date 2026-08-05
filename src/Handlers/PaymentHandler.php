@@ -3,9 +3,9 @@
  * Copyright © MultiSafepay, Inc. All rights reserved.
  * See DISCLAIMER.md for disclaimer details.
  */
+
 namespace MultiSafepay\Shopware6\Handlers;
 
-use Exception;
 use MultiSafepay\Api\Transactions\UpdateRequest;
 use MultiSafepay\Exception\ApiException;
 use MultiSafepay\Shopware6\Builder\Order\OrderRequestBuilder;
@@ -16,6 +16,7 @@ use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Log\LoggerInterface;
 use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionEntity;
 use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionStateHandler;
+use Shopware\Core\Checkout\Order\OrderEntity;
 use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\AbstractPaymentHandler;
 use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\PaymentHandlerType;
 use Shopware\Core\Checkout\Payment\Cart\PaymentTransactionStruct;
@@ -95,22 +96,23 @@ class PaymentHandler extends AbstractPaymentHandler
      * @param LoggerInterface $logger
      */
     public function __construct(
-        SdkFactory $sdkFactory,
-        OrderRequestBuilder $orderRequestBuilder,
-        EventDispatcherInterface $eventDispatcher,
-        OrderTransactionStateHandler $transactionStateHandler,
+        SdkFactory                       $sdkFactory,
+        OrderRequestBuilder              $orderRequestBuilder,
+        EventDispatcherInterface         $eventDispatcher,
+        OrderTransactionStateHandler     $transactionStateHandler,
         CachedSalesChannelContextFactory $cachedSalesChannelContextFactory,
-        SettingsService $settingsService,
-        EntityRepository $orderTransactionRepository,
-        EntityRepository $orderRepository,
-        LoggerInterface $logger
+        SettingsService                  $settingsService,
+        EntityRepository                 $orderTransactionRepository,
+        EntityRepository                 $orderRepository,
+        LoggerInterface                  $logger
         // The order repository is required as a dependency for Shopware's transaction management system
         // even though it's not directly used within this class.
         //
         // Removing this dependency would break payment transaction processing as the framework relies
         // on it being properly injected for maintaining data consistency and state management during payment
         // operations.
-    ) {
+    )
+    {
         $this->sdkFactory = $sdkFactory;
         $this->orderRequestBuilder = $orderRequestBuilder;
         $this->eventDispatcher = $eventDispatcher;
@@ -131,9 +133,10 @@ class PaymentHandler extends AbstractPaymentHandler
      */
     public function supports(
         PaymentHandlerType $type,
-        string $paymentMethodId,
-        Context $context
-    ): bool {
+        string             $paymentMethodId,
+        Context            $context
+    ): bool
+    {
         return match ($type) {
             PaymentHandlerType::RECURRING, PaymentHandlerType::REFUND => false,
             default => true,
@@ -150,11 +153,12 @@ class PaymentHandler extends AbstractPaymentHandler
      * @return RedirectResponse|null
      */
     public function pay(
-        Request $request,
+        Request                  $request,
         PaymentTransactionStruct $transaction,
-        Context $context,
-        ?Struct $validateStruct
-    ): ?RedirectResponse {
+        Context                  $context,
+        ?Struct                  $validateStruct
+    ): ?RedirectResponse
+    {
         $orderTransactionId = $transaction->getOrderTransactionId();
         $orderTransaction = $this->getOrderFromTransaction($orderTransactionId, $context);
         $order = $orderTransaction->getOrder();
@@ -290,9 +294,10 @@ class PaymentHandler extends AbstractPaymentHandler
      * @return OrderTransactionEntity
      */
     private function getOrderFromTransaction(
-        string $orderTransactionId,
+        string  $orderTransactionId,
         Context $context
-    ): OrderTransactionEntity {
+    ): OrderTransactionEntity
+    {
         $criteria = new Criteria([$orderTransactionId]);
         $criteria->addAssociation('order.orderCustomer.customer');
         $criteria->addAssociation('order.orderCustomer.salutation');
@@ -328,10 +333,11 @@ class PaymentHandler extends AbstractPaymentHandler
      * @return void
      */
     public function finalize(
-        Request $request,
+        Request                  $request,
         PaymentTransactionStruct $transaction,
-        Context $context
-    ): void {
+        Context                  $context
+    ): void
+    {
         $orderTransactionId = $transaction->getOrderTransactionId();
         $orderTransaction = $this->getOrderFromTransaction($transaction->getOrderTransactionId(), $context);
         $order = $orderTransaction->getOrder();
@@ -340,7 +346,9 @@ class PaymentHandler extends AbstractPaymentHandler
                 $transaction->getOrderTransactionId()
             );
         }
-        $orderId = $order->getOrderNumber();
+
+        // maut1: Get the correct order ID, considering possible payment method changes
+        $orderId = $this->getOrderId($order);
         $salesChannelId = $order->getSalesChannelId();
 
         if ($this->settingsService->isDebugMode($salesChannelId)) {
@@ -458,8 +466,9 @@ class PaymentHandler extends AbstractPaymentHandler
      */
     protected function createSalesChannelContext(
         PaymentTransactionStruct $transaction,
-        OrderTransactionEntity $orderTransaction
-    ): SalesChannelContext {
+        OrderTransactionEntity   $orderTransaction
+    ): SalesChannelContext
+    {
         // Get order directly from the transaction
         $order = $orderTransaction->getOrder();
         if (!$order) {
@@ -503,8 +512,9 @@ class PaymentHandler extends AbstractPaymentHandler
      */
     protected function getGatewayFromPaymentMethod(
         PaymentTransactionStruct $transaction,
-        Context $context
-    ): ?string {
+        Context                  $context
+    ): ?string
+    {
         $className = $this->getClassName();
 
         if (!is_null($className) && class_exists($className)) {
@@ -575,8 +585,9 @@ class PaymentHandler extends AbstractPaymentHandler
      */
     protected function getGender(
         PaymentTransactionStruct $transaction,
-        OrderTransactionEntity $orderTransaction
-    ): ?string {
+        OrderTransactionEntity   $orderTransaction
+    ): ?string
+    {
         return null;
     }
 
@@ -590,9 +601,10 @@ class PaymentHandler extends AbstractPaymentHandler
      */
     protected function getGenericField(
         PaymentTransactionStruct $transaction,
-        Context $context,
-        ?string $number = null
-    ): ?string {
+        Context                  $context,
+        ?string                  $number = null
+    ): ?string
+    {
         $orderTransaction = $this->getOrderFromTransaction($transaction->getOrderTransactionId(), $context);
         $salesChannelContext = $this->createSalesChannelContext($transaction, $orderTransaction);
 
@@ -638,4 +650,19 @@ class PaymentHandler extends AbstractPaymentHandler
         $request = (new Request($_GET, $_POST, array(), $_COOKIE, $_FILES, $_SERVER))->request;
         return $request->get($name);
     }
+
+
+    /**
+     * Multisafepay requires a unique order ID for each transaction.
+     * When changing payment methods, we need to update the order ID.
+     *
+     * @param OrderEntity $order
+     * @return string
+     */
+    private function getOrderId(OrderEntity $order): string
+    {
+        $customFields = $order->getCustomFields();
+        return $customFields != null && array_key_exists('changePayment', $customFields) ? $customFields['orderId'] : $order->getOrderNumber();
+    }
+
 }

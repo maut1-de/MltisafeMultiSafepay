@@ -29,17 +29,20 @@
         "optimize-autoloader": true,
         "allow-plugins": {
             "dealerdirect/phpcodesniffer-composer-installer": true,
-            "phpro/grumphp": true,
             "php-http/discovery": false,
             "symfony/runtime": false
         }
     },
     "autoload": {
         "psr-4": {
-            "Http\\Client\\": "vendor/php-http/discovery/src/",
+            "Http\\Discovery\\": "vendor/php-http/discovery/src/",
             "Psr\\Http\\Client\\": "vendor/psr/http-client/src/",
             "MultiSafepay\\Shopware6\\": "src/",
-            "MultiSafepay\\": "vendor/multisafepay/php-sdk/src/",
+            "MultiSafepay\\": "vendor/multisafepay/php-sdk/src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
             "MultiSafepay\\Shopware6\\Tests\\": "tests/"
         }
     },
@@ -65,7 +68,6 @@
     "require-dev": {
         "multisafepay/coding-standards": "dev-master",
         "phpunit/phpunit": "^11.5",
-        "phpro/grumphp": "^2.5",
         "predis/predis": "^2.2"
     },
     "scripts": {

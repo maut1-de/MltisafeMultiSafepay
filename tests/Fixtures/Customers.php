@@ -18,6 +18,7 @@ use Shopware\Core\Test\TestDefaults;
 trait Customers
 {
     use KernelTestBehaviour;
+    use Maut1SalesChannel;
 
     /**
      * @param Context $context
@@ -30,7 +31,7 @@ trait Customers
         $addressId = Uuid::randomHex();
         $customer = [
             'id' => $customerId,
-            'customerNumber' => '1337',
+            'customerNumber' => 'cust-' . substr($customerId, 0, 8),
             'salutationId' => $this->getValidSalutationId(),
             'firstName' => 'Max',
             'lastName' => 'Mustermann',
@@ -38,14 +39,15 @@ trait Customers
             'password' => 'shopware',
             'defaultPaymentMethodId' => $this->getValidPaymentMethodId(),
             'groupId' => TestDefaults::FALLBACK_CUSTOMER_GROUP,
-            'salesChannelId' => TestDefaults::SALES_CHANNEL,
+            'salesChannelId' => $this->getSalesChannelId(),
+            'languageId' => $this->getSalesChannelLanguageId(),
             'defaultBillingAddressId' => $addressId,
             'defaultShippingAddressId' => $addressId,
             'addresses' => [
                 [
                     'id' => $addressId,
                     'customerId' => $customerId,
-                    'countryId' => $this->getValidCountryId(),
+                    'countryId' => $this->getMaut1ValidCountryId(),
                     'salutationId' => $this->getValidSalutationId(),
                     'firstName' => 'Max',
                     'lastName' => 'Mustermann',
@@ -79,4 +81,6 @@ trait Customers
         $customer = $customerRepository->search($criteria, $context)->get($customerId);
         return $customer;
     }
+
+
 }

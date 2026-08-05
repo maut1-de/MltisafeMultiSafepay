@@ -42,5 +42,8 @@
         "cancel_refund": "Cancel refund",
         "confirm_process_refund": "Confirm and process refund",
         "confirm": "Confirm"
+    },
+    "multisafepay-order": {
+        "orderIdHistory": "Previous order IDs: "
     }
 }

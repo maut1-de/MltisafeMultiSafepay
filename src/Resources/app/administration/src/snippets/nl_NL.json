@@ -42,5 +42,8 @@
         "cancel_refund": "Terugbetaling annuleren",
         "confirm_process_refund": "Bevestigen en terugbetaling verwerken",
         "confirm": "Bevestigen"
+    },
+    "multisafepay-order": {
+        "orderIdHistory": "Eerdere order-ID's: "
     }
 }

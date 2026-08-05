@@ -4,7 +4,6 @@
  * See DISCLAIMER.md for disclaimer details.
  */
 namespace MultiSafepay\Shopware6\Tests\Fixtures;
-
 use DateTimeImmutable;
 use Exception;
 use RuntimeException;
@@ -36,6 +35,7 @@ use const JSON_THROW_ON_ERROR;
 trait Orders
 {
     use KernelTestBehaviour;
+    use Maut1SalesChannel;
 
     /**
      *  Create an order
@@ -97,7 +97,7 @@ trait Orders
                     'guest' => true,
                     'group' => ['name' => 'testse2323'],
                     'defaultPaymentMethodId' => $this->getValidPaymentMethodId(),
-                    'salesChannelId' => TestDefaults::SALES_CHANNEL,
+                    'salesChannelId' => $this->getSalesChannelId(),
                     'defaultBillingAddressId' => $addressId,
                     'defaultShippingAddressId' => $addressId,
                     'addresses' => [
@@ -112,7 +112,7 @@ trait Orders
                             'countryStateId' => $countryStateId,
                             'country' => [
                                 'name' => 'kasachstan',
-                                'id' => $this->getValidCountryId(),
+                                'id' => $this->getMaut1ValidCountryId(),
                                 'states' => [
                                     [
                                         'id' => $countryStateId,
@@ -129,7 +129,7 @@ trait Orders
             'paymentMethodId' => $this->getValidPaymentMethodId(),
             'currencyId' => Defaults::CURRENCY,
             'currencyFactor' => 1,
-            'salesChannelId' => TestDefaults::SALES_CHANNEL,
+            'salesChannelId' => $this->getSalesChannelId(),
             'deliveries' => [
                 [
                     'stateId' => $stateId,
@@ -151,7 +151,7 @@ trait Orders
                         'street' => 'street',
                         'country' => [
                             'name' => 'kasachstan',
-                            'id' => $this->getValidCountryId(),
+                            'id' => $this->getMaut1ValidCountryId(),
                         ],
                     ],
                     'positions' => [
@@ -197,7 +197,7 @@ trait Orders
                     'zipcode' => '59438-0403',
                     'city' => 'Stellaberg',
                     'street' => 'street',
-                    'countryId' => $this->getValidCountryId(),
+                    'countryId' => $this->getMaut1ValidCountryId(),
                     'id' => $addressId,
                 ],
             ],

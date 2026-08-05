@@ -41,8 +41,10 @@
             <argument type="service" id="MultiSafepay\Shopware6\Service\SettingsService"/>
         </service>
         <service id="MultiSafepay\Shopware6\Builder\Order\OrderRequestBuilderPool"/>
+        <!-- // maut1 custom-->
         <service id="MultiSafepay\Shopware6\Builder\Order\OrderRequestBuilder">
             <argument type="service" id="MultiSafepay\Shopware6\Builder\Order\OrderRequestBuilderPool"/>
+            <argument type="service" id="order.repository"/>
         </service>
     </services>
 </container>

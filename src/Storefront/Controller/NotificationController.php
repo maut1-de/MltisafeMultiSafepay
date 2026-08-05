@@ -3,6 +3,7 @@
  * Copyright © MultiSafepay, Inc. All rights reserved.
  * See DISCLAIMER.md for disclaimer details.
  */
+
 namespace MultiSafepay\Shopware6\Storefront\Controller;
 
 use Exception;
@@ -17,11 +18,13 @@ use MultiSafepay\Shopware6\Util\RequestUtil;
 use MultiSafepay\Util\Notification;
 use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Log\LoggerInterface;
+use Shopware\Core\Checkout\Order\OrderEntity;
 use Shopware\Core\Framework\Context;
 use Shopware\Core\Framework\DataAbstractionLayer\Exception\InconsistentCriteriaIdsException;
 use Shopware\Storefront\Controller\StorefrontController;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
+use TypeError;
 
 /**
  * Class NotificationController
@@ -71,19 +74,94 @@ class NotificationController extends StorefrontController
      * @param LoggerInterface $logger
      */
     public function __construct(
-        CheckoutHelper $checkoutHelper,
-        SdkFactory $sdkFactory,
-        RequestUtil $requestUtil,
-        OrderUtil $orderUtil,
+        CheckoutHelper  $checkoutHelper,
+        SdkFactory      $sdkFactory,
+        RequestUtil     $requestUtil,
+        OrderUtil       $orderUtil,
         SettingsService $settingsService,
         LoggerInterface $logger
-    ) {
+    )
+    {
         $this->checkoutHelper = $checkoutHelper;
         $this->request = $requestUtil->getGlobals();
         $this->sdkFactory = $sdkFactory;
         $this->orderUtil = $orderUtil;
         $this->config = $settingsService;
         $this->logger = $logger;
+    }
+
+    /**
+     * Check if the id has an unix timestamp at the end (indicating a payment change)
+     *
+     * Maut1: order numbers themselves can end in a 10-digit block (e.g. the local/test
+     * number-range format <customerNumber>_<YYMMDDHHmm>) — an id that matches an existing
+     * order number EXACTLY is a normal checkout, never a payment change. Only ids without an
+     * exact order match are treated as payment-change ids (orderNumber + appended timestamp).
+     *
+     * @param string $id
+     * @return bool
+     */
+    private function isPaymentChange(string $id): bool
+    {
+        if (preg_match('/\d{10}$/', $id) !== 1) {
+            return false;
+        }
+
+        return is_null($this->findOrderFromNumber($id));
+    }
+
+    /**
+     * Null-safe order lookup by order number. OrderUtil::getOrderFromNumber() declares a
+     * non-nullable return type but forwards `->first()`, which yields null for unknown
+     * numbers — that TypeError previously escaped as a 500 on the notification route.
+     *
+     * @param string $orderNumber
+     * @return OrderEntity|null
+     */
+    private function findOrderFromNumber(string $orderNumber): ?OrderEntity
+    {
+        try {
+            return $this->orderUtil->getOrderFromNumber($orderNumber);
+        } catch (TypeError|InconsistentCriteriaIdsException) {
+            return null;
+        }
+    }
+
+    /**
+     * Resolve MultiSafepay transaction id to Shopware order number.
+     * - Payment change: id is orderNumber + 10-digit timestamp; strip the timestamp.
+     * - Unique id format (orderNumber-xxx-timestamp): strip to orderNumber (before first '-').
+     * - Plain order number: return as-is.
+     *
+     * @param bool $isPaymentChange
+     * @param string $id
+     * @return string
+     */
+    private function getOrderNumber(bool $isPaymentChange, string $id): string
+    {
+        if ($isPaymentChange) {
+            return substr($id, 0, -10);
+        }
+
+        return $id;
+    }
+
+    /**
+     * Get the correct status considering payment changes
+     * @param TransactionResponse $transaction
+     * @param bool $isPaymentChange
+     * @return string
+     */
+    private function getStatus(TransactionResponse $transaction, bool $isPaymentChange): string
+    {
+        $status = $transaction->getStatus();
+
+        // Maut1: For payment changes with direct debit, we set the status to completed
+        if ($isPaymentChange && $transaction->getPaymentDetails()->getType() == 'DIRDEB') {
+            return 'completed';
+        }
+
+        return $status;
     }
 
     /**
@@ -96,17 +174,17 @@ class NotificationController extends StorefrontController
     public function notification(Context $context): Response
     {
         $response = new Response();
-        $orderNumber = $this->request->query->get('transactionid');
+        $id = $this->request->query->getString('transactionid');
 
-        try {
-            $order = $this->orderUtil->getOrderFromNumber($orderNumber);
-        } catch (InconsistentCriteriaIdsException $exception) {
+        // Maut1: Check if this is a payment change
+        $isPaymentChange = $this->isPaymentChange($id);
+        $orderNumber = $this->getOrderNumber($isPaymentChange, $id);
+        $order = $this->findOrderFromNumber($orderNumber);
+        if (is_null($order)) {
             $this->logger->warning('Order not found for MultiSafepay notification', [
                 'message' => 'Could not find order for notification',
                 'orderNumber' => $orderNumber,
-                'orderId' => 'unknown',
-                'exceptionMessage' => $exception->getMessage(),
-                'exceptionCode' => $exception->getCode()
+                'orderId' => 'unknown'
             ]);
 
             return $response->setContent('NG');
@@ -122,21 +200,23 @@ class NotificationController extends StorefrontController
 
         try {
             $result = $this->sdkFactory->create($order->getSalesChannelId())
-                ->getTransactionManager()->get($orderNumber);
+                ->getTransactionManager()->get($id);
         } catch (Exception $exception) {
-            $this->logger->error('Failed to get transaction from MultiSafepay', [
-                'message' => 'Could not retrieve transaction details from MultiSafepay API',
+            $this->logger->error('Order not found in notification', [
+                'message' => 'Could not find order by order number',
                 'orderNumber' => $orderNumber,
                 'orderId' => $order->getId(),
                 'salesChannelId' => $order->getSalesChannelId(),
                 'exceptionMessage' => $exception->getMessage(),
                 'exceptionCode' => $exception->getCode()
             ]);
-
             return $response->setContent('NG');
         }
 
-        $this->checkoutHelper->transitionPaymentState($result->getStatus(), $transactionId, $context);
+        // Maut1: Get the correct status considering payment changes
+        $status = $this->getStatus($result, $isPaymentChange);
+        $this->checkoutHelper->transitionPaymentState($status, $transactionId, $context);
+
         $this->checkoutHelper->transitionPaymentMethodIfNeeded(
             $transaction,
             $context,
@@ -155,17 +235,18 @@ class NotificationController extends StorefrontController
     public function postNotification(): Response
     {
         $response = new Response();
-        $orderNumber = $this->request->query->get('transactionid');
+        $id = $this->request->query->getString('transactionid');
 
-        try {
-            $order = $this->orderUtil->getOrderFromNumber($orderNumber);
-        } catch (InconsistentCriteriaIdsException $exception) {
+        // Maut1: Check if this is a payment change
+        $isPaymentChange = $this->isPaymentChange($id);
+        $orderNumber = $this->getOrderNumber($isPaymentChange, $id);
+        $order = $this->findOrderFromNumber($orderNumber);
+        if (is_null($order)) {
             $this->logger->warning('Order not found in post-notification', [
                 'message' => 'Could not find order by order number',
                 'orderNumber' => $orderNumber,
-                'exceptionMessage' => $exception->getMessage()
+                'orderId' => 'unknown'
             ]);
-
             return $response->setContent('NG');
         }
 
@@ -219,7 +300,10 @@ class NotificationController extends StorefrontController
         }
 
         $context = Context::createDefaultContext();
-        $this->checkoutHelper->transitionPaymentState($transaction->getStatus(), $transactionId, $context);
+
+        // Maut1: Get the correct status considering payment changes
+        $status = $this->getStatus($transaction, $isPaymentChange);
+        $this->checkoutHelper->transitionPaymentState($status, $transactionId, $context);
         $this->checkoutHelper->transitionPaymentMethodIfNeeded(
             $shopwareTransaction,
             $context,

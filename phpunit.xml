@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/12.5/phpunit.xsd"
+         bootstrap="./tests/TestBootstrap.php" executionOrder="random" colors="true"
+         failOnDeprecation="false"
+         failOnPhpunitDeprecation="true"
+         displayDetailsOnTestsThatTriggerDeprecations="true"
+>
+    <php>
+        <ini name="display_errors" value="-1"/>
+        <ini name="error_reporting" value="-1"/>
+        <server name="KERNEL_CLASS" value="Shopware\Core\Kernel"/>
+        <env name="APP_ENV" value="test"/>
+        <env name="APP_DEBUG" value="-1"/>
+        <env name="SYMFONY_DEPRECATIONS_HELPER" value="disabled"/>
+        <!-- JWT payment token (HMAC-SHA256) requires key of at least 256 bits (32 bytes) -->
+        <env name="APP_SECRET" value="s3cr3tf0rp4ym3nt0k3nt3st1ng4t1e4st32ch"/>
+    </php>
+    <testsuites>
+        <testsuite name="Plugin Testsuite">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+    <source ignoreIndirectDeprecations="true">
+        <include>
+            <directory>./src/</directory>
+        </include>
+    </source>
+</phpunit>

@@ -42,5 +42,8 @@
         "cancel_refund": "Rückerstattung abbrechen",
         "confirm_process_refund": "Bestätigen und Rückerstattung verarbeiten",
         "confirm": "Bestätigen"
+    },
+    "multisafepay-order": {
+        "orderIdHistory": "Frühere Bestellnummern: "
     }
 }
