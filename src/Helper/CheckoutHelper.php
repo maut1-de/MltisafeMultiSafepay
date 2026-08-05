@@ -5,11 +5,15 @@
  */
 namespace MultiSafepay\Shopware6\Helper;
 
+use MultiSafepay\Api\Transactions\TransactionResponse;
+use MultiSafepay\Shopware6\Helper\ManualCaptureHelper;
 use MultiSafepay\Shopware6\Util\PaymentUtil;
 use Psr\Log\LoggerInterface;
+use RuntimeException;
 use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionEntity;
 use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionStateHandler;
 use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionStates;
+use Shopware\Core\Checkout\Payment\PaymentMethodEntity;
 use Shopware\Core\Framework\Context;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\DataAbstractionLayer\Exception\InconsistentCriteriaIdsException;
@@ -28,6 +32,11 @@ use Shopware\Core\System\StateMachine\Exception\IllegalTransitionException;
  */
 class CheckoutHelper
 {
+    private const WALLET_APPLE_PAY = 'APPLEPAY';
+    private const WALLET_GOOGLE_PAY = 'GOOGLEPAY';
+    private const WALLET_DISPLAY = 'multisafepay_payment_method_display';
+    private const WALLET_DISPLAY_ADMIN = 'multisafepay_payment_method_display_admin';
+
     /**
      * @var OrderTransactionStateHandler $orderTransactionStateHandler
      */
@@ -59,6 +68,11 @@ class CheckoutHelper
     private PaymentUtil $paymentUtil;
 
     /**
+     * @var ManualCaptureHelper
+     */
+    private ManualCaptureHelper $manualCaptureHelper;
+
+    /**
      * CheckoutHelper constructor
      *
      * @param OrderTransactionStateHandler $orderTransactionStateHandler
@@ -67,6 +81,7 @@ class CheckoutHelper
      * @param LoggerInterface $logger
      * @param EntityRepository $paymentMethodsRepository
      * @param PaymentUtil $paymentUtil
+     * @param ManualCaptureHelper|null $manualCaptureHelper
      */
     public function __construct(
         OrderTransactionStateHandler $orderTransactionStateHandler,
@@ -74,7 +89,8 @@ class CheckoutHelper
         EntityRepository $stateMachineRepository,
         LoggerInterface $logger,
         EntityRepository $paymentMethodsRepository,
-        PaymentUtil $paymentUtil
+        PaymentUtil $paymentUtil,
+        ?ManualCaptureHelper $manualCaptureHelper = null
     ) {
         $this->transactionRepository = $transactionRepository;
         $this->orderTransactionStateHandler = $orderTransactionStateHandler;
@@ -82,6 +98,7 @@ class CheckoutHelper
         $this->logger = $logger;
         $this->paymentMethodRepository = $paymentMethodsRepository;
         $this->paymentUtil = $paymentUtil;
+        $this->manualCaptureHelper = $manualCaptureHelper ?? new ManualCaptureHelper();
     }
 
     /**
@@ -97,14 +114,118 @@ class CheckoutHelper
     {
         $transitionAction = $this->getCorrectTransitionAction($status);
 
+        $this->transitionPaymentStateWithAction($transitionAction, $status, $orderTransactionId, $context);
+    }
+
+    /**
+     * Transition the payment state from a full MultiSafepay transaction response.
+     *
+     * @param TransactionResponse $transaction
+     * @param string $orderTransactionId
+     * @param Context $context
+     * @throws IllegalTransitionException
+     * @throws InconsistentCriteriaIdsException
+     */
+    public function transitionPaymentStateFromTransaction(
+        TransactionResponse $transaction,
+        string $orderTransactionId,
+        Context $context
+    ): void {
+        $transitionAction = $this->getCorrectTransitionActionFromTransaction($transaction);
+
+        $this->transitionPaymentStateWithAction($transitionAction, $transaction->getStatus(), $orderTransactionId, $context);
+    }
+
+    /**
+     * Transition the payment state to paid after a confirmed manual capture.
+     *
+     * @param string $orderTransactionId
+     * @param Context $context
+     * @throws IllegalTransitionException
+     * @throws InconsistentCriteriaIdsException
+     */
+    public function transitionPaymentStateToPaid(string $orderTransactionId, Context $context): void
+    {
+        $this->transitionPaymentStateWithAction(
+            StateMachineTransitionActions::ACTION_PAID,
+            'completed',
+            $orderTransactionId,
+            $context
+        );
+    }
+
+    /**
+     * Transition the payment state to partially paid after a confirmed partial manual capture.
+     *
+     * @param string $orderTransactionId
+     * @param Context $context
+     * @throws IllegalTransitionException
+     * @throws InconsistentCriteriaIdsException
+     */
+    public function transitionPaymentStateToPartiallyPaid(string $orderTransactionId, Context $context): void
+    {
+        $this->transitionPaymentStateWithAction(
+            StateMachineTransitionActions::ACTION_PAID_PARTIALLY,
+            'completed',
+            $orderTransactionId,
+            $context
+        );
+    }
+
+    /**
+     * Transition the payment state with a resolved Shopware transition action.
+     *
+     * @param string|null $transitionAction
+     * @param string $status
+     * @param string $orderTransactionId
+     * @param Context $context
+     * @throws IllegalTransitionException
+     * @throws InconsistentCriteriaIdsException
+     */
+    private function transitionPaymentStateWithAction(
+        ?string $transitionAction,
+        string $status,
+        string $orderTransactionId,
+        Context $context
+    ): void {
         if (is_null($transitionAction)) {
+            return;
+        }
+
+        // If the transaction was (partially) refunded, don't allow later notifications to regress it back to paid/cancel/open.
+        $transaction = $this->getTransaction($orderTransactionId, $context);
+        $currentTechnicalState = $transaction->getStateMachineState()?->getTechnicalName();
+        $isRefundedState = in_array(
+            $currentTechnicalState,
+            [OrderTransactionStates::STATE_REFUNDED, OrderTransactionStates::STATE_PARTIALLY_REFUNDED],
+            true
+        );
+
+        if ($isRefundedState && in_array(
+            $transitionAction,
+            [
+                StateMachineTransitionActions::ACTION_PAID,
+                StateMachineTransitionActions::ACTION_PAID_PARTIALLY,
+                StateMachineTransitionActions::ACTION_CANCEL,
+                StateMachineTransitionActions::ACTION_REOPEN,
+                StateMachineTransitionActions::ACTION_AUTHORIZE,
+            ],
+            true
+        )
+        ) {
+            return;
+        }
+
+        if ($currentTechnicalState === OrderTransactionStates::STATE_PAID
+            && $transitionAction === StateMachineTransitionActions::ACTION_AUTHORIZE
+        ) {
             return;
         }
 
         /**
          * Check if the status is the same, so we don't need to update it
          */
-        if ($this->isSameStateId($transitionAction, $orderTransactionId, $context)) {
+        if ($this->isSameStateId($transitionAction, $orderTransactionId, $context, $transaction)) {
             return;
         }
 
@@ -113,12 +234,10 @@ class CheckoutHelper
         try {
             $this->orderTransactionStateHandler->$functionName($orderTransactionId, $context);
         } catch (IllegalTransitionException) {
-            $transaction = $this->getTransaction($orderTransactionId, $context);
-
             $stateMachineState = $transaction->getStateMachineState();
             $currentState = !is_null($stateMachineState) ? $stateMachineState->getName() : 'null';
 
-            // Check if order is available through associations
+            // Check if the order is available through associations
             $criteria = new Criteria([$transaction->getId()]);
             $criteria->addAssociation('order');
             $loadedTransaction = $this->transactionRepository->search($criteria, $context)->first();
@@ -132,9 +251,47 @@ class CheckoutHelper
                 'status' => $status
             ]);
 
+            // Never force a reopen() for refund transitions. If the refund transition is illegal
+            // (e.g. wrong transaction selected), reopening can leave the order transaction in "open".
+            if (in_array(
+                $transitionAction,
+                [
+                    StateMachineTransitionActions::ACTION_REFUND,
+                    StateMachineTransitionActions::ACTION_REFUND_PARTIALLY
+                ],
+                true
+            )) {
+                return;
+            }
+
             $this->orderTransactionStateHandler->reopen($orderTransactionId, $context);
             $this->orderTransactionStateHandler->$functionName($orderTransactionId, $context);
         }
+    }
+
+    /**
+     * Get the correct transition action from a full MultiSafepay transaction response.
+     *
+     * @param TransactionResponse $transaction
+     * @return string|null
+     */
+    public function getCorrectTransitionActionFromTransaction(TransactionResponse $transaction): ?string
+    {
+        if ($this->manualCaptureHelper->isManualCaptureTransaction($transaction)) {
+            if ($this->manualCaptureHelper->isFullyCaptured($transaction)) {
+                return StateMachineTransitionActions::ACTION_PAID;
+            }
+
+            if ($this->manualCaptureHelper->isPartiallyCaptured($transaction)) {
+                return StateMachineTransitionActions::ACTION_PAID_PARTIALLY;
+            }
+
+            if ($this->manualCaptureHelper->isAuthorized($transaction)) {
+                return StateMachineTransitionActions::ACTION_AUTHORIZE;
+            }
+        }
+
+        return $this->getCorrectTransitionAction($transaction->getStatus());
     }
 
     /**
@@ -167,6 +324,7 @@ class CheckoutHelper
     {
         $criteria = new Criteria([$transactionId]);
         $criteria->addAssociation('order');
+        $criteria->addAssociation('stateMachineState');
 
         /** @var OrderTransactionEntity $transaction */
         return $this->transactionRepository->search($criteria, $context)
@@ -179,12 +337,17 @@ class CheckoutHelper
      * @param string $actionName
      * @param string $orderTransactionId
      * @param Context $context
+     * @param OrderTransactionEntity|null $transaction
      * @return bool
      * @throws InconsistentCriteriaIdsException
      */
-    public function isSameStateId(string $actionName, string $orderTransactionId, Context $context): bool
-    {
-        $transaction = $this->getTransaction($orderTransactionId, $context);
+    public function isSameStateId(
+        string $actionName,
+        string $orderTransactionId,
+        Context $context,
+        ?OrderTransactionEntity $transaction = null
+    ): bool {
+        $transaction ??= $this->getTransaction($orderTransactionId, $context);
         $currentStateId = $transaction->getStateId();
 
         $actionStatusTransition = $this->getTransitionFromActionName($actionName, $context);
@@ -194,7 +357,7 @@ class CheckoutHelper
             return true;
         }
 
-        // Note: DO THIS CHECK TO PREVENT ERRORS ON 6.3
+        // Note: Perform this check to prevent errors on Shopware 6.3
         $getStateMachineState = $transaction->getStateMachineState();
         if (!is_null($getStateMachineState)) {
             return $getStateMachineState->getTechnicalName() === $actionStatusTransition->getTechnicalName();
@@ -215,9 +378,16 @@ class CheckoutHelper
     {
         $stateName = $this->getOrderTransactionStatesNameFromAction($actionName);
         $criteria = new Criteria();
+        $criteria->addAssociation('stateMachine');
         $criteria->addFilter(new EqualsFilter('technicalName', $stateName));
+        $criteria->addFilter(new EqualsFilter('stateMachine.technicalName', 'order_transaction.state'));
 
-        return $this->stateMachineRepository->search($criteria, $context)->first();
+        $state = $this->stateMachineRepository->search($criteria, $context)->first();
+        if (!$state instanceof StateMachineStateEntity) {
+            throw new RuntimeException(sprintf('Could not resolve state "%s" for order_transaction.state', $stateName));
+        }
+
+        return $state;
     }
 
     /**
@@ -229,8 +399,12 @@ class CheckoutHelper
     public function getOrderTransactionStatesNameFromAction(string $actionName): string
     {
         return match ($actionName) {
+            StateMachineTransitionActions::ACTION_AUTHORIZE => OrderTransactionStates::STATE_AUTHORIZED,
             StateMachineTransitionActions::ACTION_PAID => OrderTransactionStates::STATE_PAID,
+            StateMachineTransitionActions::ACTION_PAID_PARTIALLY => OrderTransactionStates::STATE_PARTIALLY_PAID,
             StateMachineTransitionActions::ACTION_CANCEL => OrderTransactionStates::STATE_CANCELLED,
+            StateMachineTransitionActions::ACTION_REFUND => OrderTransactionStates::STATE_REFUNDED,
+            StateMachineTransitionActions::ACTION_REFUND_PARTIALLY => OrderTransactionStates::STATE_PARTIALLY_REFUNDED,
             default => OrderTransactionStates::STATE_OPEN,
         };
     }
@@ -241,19 +415,50 @@ class CheckoutHelper
      * @param OrderTransactionEntity $transaction
      * @param Context $context
      * @param string $gatewayCode
+     * @param string|null $wallet
      */
     public function transitionPaymentMethodIfNeeded(
         OrderTransactionEntity $transaction,
         Context $context,
-        string $gatewayCode
+        string $gatewayCode,
+        ?string $wallet = null
     ): void {
         $paymentMethodId = $transaction->getPaymentMethodId();
         $criteria = new Criteria([$paymentMethodId]);
         $paymentMethod = $this->paymentMethodRepository->search($criteria, $context)->get($paymentMethodId);
+
+        if ($paymentMethod === null) {
+            $this->logger->warning('Payment method not found while attempting to transition payment method for transaction.', [
+                'paymentMethodId' => $paymentMethodId,
+                'transactionId' => $transaction->getId(),
+            ]);
+
+            return;
+        }
+
         $expectedPaymentHandler = $paymentMethod->getHandlerIdentifier();
-        $usedPaymentHandler = $this->paymentUtil->getHandlerIdentifierForGatewayCode($gatewayCode);
+        $resolvedGatewayCode = $this->resolveGatewayCode($gatewayCode, $wallet);
+        $usedPaymentHandler = $this->paymentUtil->getHandlerIdentifierForGatewayCode($resolvedGatewayCode);
+        $walletPaymentMethodDisplay = $this->buildWalletPaymentMethodDisplay($wallet, $gatewayCode);
+        $walletPaymentMethodDisplayAdmin = $this->buildWalletPaymentMethodDisplayForAdmin(
+            $walletPaymentMethodDisplay,
+            $this->resolvePaymentMethodDisplayName($paymentMethod)
+        );
 
         if ($expectedPaymentHandler === $usedPaymentHandler) {
+            // Even without a handler switch, wallet display keys may need cleanup.
+            $this->updateTransactionPaymentData(
+                $transaction,
+                $context,
+                null,
+                $walletPaymentMethodDisplay,
+                $walletPaymentMethodDisplayAdmin
+            );
+
+            return;
+        }
+
+        if (!$usedPaymentHandler) {
             return;
         }
 
@@ -265,11 +470,196 @@ class CheckoutHelper
             return;
         }
 
+        $this->updateTransactionPaymentData(
+            $transaction,
+            $context,
+            $newPaymentMethod->getId(),
+            $walletPaymentMethodDisplay,
+            $this->buildWalletPaymentMethodDisplayForAdmin(
+                $walletPaymentMethodDisplay,
+                $this->resolvePaymentMethodDisplayName($newPaymentMethod)
+            )
+        );
+    }
+
+    /**
+     * Persists payment method changes and/or the display custom field on the transaction.
+     *
+     * @param OrderTransactionEntity $transaction
+     * @param Context $context
+     * @param string|null $newPaymentMethodId
+     * @param string|null $walletPaymentMethodDisplay
+     * @param string|null $walletPaymentMethodDisplayAdmin
+     */
+    private function updateTransactionPaymentData(
+        OrderTransactionEntity $transaction,
+        Context $context,
+        ?string $newPaymentMethodId,
+        ?string $walletPaymentMethodDisplay,
+        ?string $walletPaymentMethodDisplayAdmin
+    ): void {
         $updateData = [
             'id' => $transaction->getId(),
-            'paymentMethodId' => $newPaymentMethod->getId(),
         ];
+
+        if ($newPaymentMethodId !== null) {
+            $updateData['paymentMethodId'] = $newPaymentMethodId;
+        }
+
+        $customFields = $transaction->getCustomFields() ?? [];
+        $originalCustomFields = $customFields;
+
+        if ($walletPaymentMethodDisplay !== null) {
+            $customFields[self::WALLET_DISPLAY] = $walletPaymentMethodDisplay;
+
+            if ($walletPaymentMethodDisplayAdmin !== null) {
+                $customFields[self::WALLET_DISPLAY_ADMIN] = $walletPaymentMethodDisplayAdmin;
+            }
+        } else {
+            unset($customFields[self::WALLET_DISPLAY], $customFields[self::WALLET_DISPLAY_ADMIN]);
+        }
+
+        if ($customFields !== $originalCustomFields) {
+            $updateData['customFields'] = $customFields;
+        }
+
+        if (!array_key_exists('paymentMethodId', $updateData) && !array_key_exists('customFields', $updateData)) {
+            return;
+        }
+
         $this->transactionRepository->update([$updateData], $context);
+    }
+
+    /**
+     * Resolves the effective gateway code, prioritizing wallet codes when applicable.
+     *
+     * @param string $gatewayCode
+     * @param string|null $wallet
+     * @return string
+     */
+    private function resolveGatewayCode(string $gatewayCode, ?string $wallet): string
+    {
+        $walletCode = strtoupper((string)$wallet);
+
+        return match ($walletCode) {
+            self::WALLET_APPLE_PAY, self::WALLET_GOOGLE_PAY => $walletCode,
+            default => $gatewayCode,
+        };
+    }
+
+    /**
+     * Builds the "Wallet (Card)" display text stored in transaction custom fields.
+     *
+     * Returns null for non-wallet payments or unknown instruments.
+     *
+     * @param string|null $wallet
+     * @param string $gatewayCode
+     * @return string|null
+     */
+    private function buildWalletPaymentMethodDisplay(?string $wallet, string $gatewayCode): ?string
+    {
+        $walletName = match (strtoupper((string)$wallet)) {
+            self::WALLET_APPLE_PAY => 'Apple Pay',
+            self::WALLET_GOOGLE_PAY => 'Google Pay',
+            default => null,
+        };
+
+        if ($walletName === null) {
+            return null;
+        }
+
+        $paymentMethodName = match (strtoupper($gatewayCode)) {
+            'AMEX' => 'American Express',
+            'VISA' => 'Visa',
+            'MASTERCARD' => 'Mastercard',
+            default => null,
+        };
+
+        if ($paymentMethodName === null) {
+            return null;
+        }
+
+        return sprintf('%s (%s)', $walletName, $paymentMethodName);
+    }
+
+    /**
+     * Builds the administration display text by reusing the payment method
+     * suffix after "|" from the configured payment method name.
+     *
+     * Example:
+     * Payment method name: "Google Pay | MultiSafepay module for Shopware 6"
+     * Wallet display: "Google Pay (Visa)"
+     * Result: "Google Pay (Visa) | MultiSafepay module for Shopware 6"
+     *
+     * @param string|null $walletPaymentMethodDisplay
+     * @param string|null $paymentMethodDisplayName
+     * @return string|null
+     */
+    private function buildWalletPaymentMethodDisplayForAdmin(
+        ?string $walletPaymentMethodDisplay,
+        ?string $paymentMethodDisplayName
+    ): ?string {
+        if ($walletPaymentMethodDisplay === null) {
+            return null;
+        }
+
+        if ($paymentMethodDisplayName === null) {
+            return $walletPaymentMethodDisplay;
+        }
+
+        $separatorPosition = strpos($paymentMethodDisplayName, '|');
+
+        if ($separatorPosition === false) {
+            return $walletPaymentMethodDisplay;
+        }
+
+        $paymentMethodSuffix = trim(substr($paymentMethodDisplayName, $separatorPosition + 1));
+
+        if ($paymentMethodSuffix === '') {
+            return $walletPaymentMethodDisplay;
+        }
+
+        return sprintf('%s | %s', $walletPaymentMethodDisplay, $paymentMethodSuffix);
+    }
+
+    /**
+     * Resolves the display name for a payment method using the same preference
+     * order as administration rendering.
+     *
+     * @param PaymentMethodEntity|null $paymentMethod
+     * @return string|null
+     */
+    private function resolvePaymentMethodDisplayName(?PaymentMethodEntity $paymentMethod): ?string
+    {
+        if ($paymentMethod === null) {
+            return null;
+        }
+
+        $translated = $paymentMethod->getTranslated();
+
+        if (is_array($translated)) {
+            if (isset($translated['distinguishableName'])
+                && is_string($translated['distinguishableName'])
+                && trim($translated['distinguishableName']) !== ''
+            ) {
+                return $translated['distinguishableName'];
+            }
+
+            if (isset($translated['name'])
+                && is_string($translated['name'])
+                && trim($translated['name']) !== ''
+            ) {
+                return $translated['name'];
+            }
+        }
+
+        $paymentMethodName = $paymentMethod->getName();
+
+        if (is_string($paymentMethodName) && trim($paymentMethodName) !== '') {
+            return $paymentMethodName;
+        }
+
+        return null;
     }
 
     /**

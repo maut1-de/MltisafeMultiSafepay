@@ -213,14 +213,23 @@ class NotificationController extends StorefrontController
             return $response->setContent('NG');
         }
 
-        // Maut1: Get the correct status considering payment changes
+        // Maut1: Get the correct status considering payment changes. Deliberately kept on
+        // transitionPaymentState() rather than 4.3's transitionPaymentStateFromTransaction() —
+        // the latter doesn't delegate through transitionPaymentState() internally, so
+        // MauteinsPaymentChanger's MultiSafepayCheckoutHelperDecorator (uncleared/direct-debit ->
+        // in_progress override) would silently stop firing on this webhook path.
         $status = $this->getStatus($result, $isPaymentChange);
         $this->checkoutHelper->transitionPaymentState($status, $transactionId, $context);
 
+        $paymentDetails = $result->getPaymentDetails();
+        $wallet = $paymentDetails->get('wallet');
+        $wallet = is_string($wallet) ? trim($wallet) : null;
+        $wallet = $wallet !== '' ? $wallet : null;
         $this->checkoutHelper->transitionPaymentMethodIfNeeded(
             $transaction,
             $context,
-            $result->getPaymentDetails()->getType()
+            $paymentDetails->getType(),
+            $wallet
         );
 
         return $response->setContent('OK');
@@ -301,13 +310,20 @@ class NotificationController extends StorefrontController
 
         $context = Context::createDefaultContext();
 
-        // Maut1: Get the correct status considering payment changes
+        // Maut1: Get the correct status considering payment changes — same rationale as
+        // notification() above (keep transitionPaymentState(), not transitionPaymentStateFromTransaction()).
         $status = $this->getStatus($transaction, $isPaymentChange);
         $this->checkoutHelper->transitionPaymentState($status, $transactionId, $context);
+
+        $paymentDetails = $transaction->getPaymentDetails();
+        $wallet = $paymentDetails->get('wallet');
+        $wallet = is_string($wallet) ? trim($wallet) : null;
+        $wallet = $wallet !== '' ? $wallet : null;
         $this->checkoutHelper->transitionPaymentMethodIfNeeded(
             $shopwareTransaction,
             $context,
-            $transaction->getPaymentDetails()->getType()
+            $paymentDetails->getType(),
+            $wallet
         );
 
         return $response->setContent('OK');

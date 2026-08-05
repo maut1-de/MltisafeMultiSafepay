@@ -6,9 +6,11 @@
 
 namespace MultiSafepay\Shopware6\Builder\Order;
 
+use MultiSafepay\Api\Transactions\CaptureRequest;
 use MultiSafepay\Api\Transactions\OrderRequest;
 use MultiSafepay\Api\Transactions\OrderRequest\Arguments\GatewayInfo\Meta;
 use MultiSafepay\Exception\InvalidArgumentException;
+use MultiSafepay\Shopware6\Helper\ManualCaptureHelper;
 use MultiSafepay\Shopware6\Sources\Transaction\TransactionTypeSource;
 use MultiSafepay\ValueObject\Money;
 use Shopware\Core\Checkout\Order\OrderEntity;
@@ -41,17 +43,26 @@ class OrderRequestBuilder
     private EntityRepository $orderRepository;
 
     /**
+     * @var ManualCaptureHelper
+     */
+    private ManualCaptureHelper $manualCaptureHelper;
+
+    /**
      * OrderRequestBuilder constructor
      *
      * @param \MultiSafepay\Shopware6\Builder\Order\OrderRequestBuilderPool $orderRequestBuilderPool
+     * @param EntityRepository $orderRepository
+     * @param ManualCaptureHelper|null $manualCaptureHelper
      */
     public function __construct(
         \MultiSafepay\Shopware6\Builder\Order\OrderRequestBuilderPool $orderRequestBuilderPool,
-        EntityRepository                                              $orderRepository
+        EntityRepository                                              $orderRepository,
+        ?ManualCaptureHelper                                          $manualCaptureHelper = null
     )
     {
         $this->orderRequestBuilderPool = $orderRequestBuilderPool;
         $this->orderRepository = $orderRepository;
+        $this->manualCaptureHelper = $manualCaptureHelper ?? new ManualCaptureHelper();
     }
 
     /**
@@ -106,6 +117,14 @@ class OrderRequestBuilder
 
         if ($dataBag->getBoolean('tokenize')) {
             $orderRequest->addData(['recurring_model' => 'cardOnFile']);
+        }
+
+        $paymentMethodCustomFields = $salesChannelContext->getPaymentMethod()->getCustomFields() ?? [];
+        if ($this->manualCaptureHelper->isManualCaptureEnabledForGateway(
+            $gateway,
+            $paymentMethodCustomFields
+        )) {
+            $orderRequest->addData(['capture' => CaptureRequest::CAPTURE_MANUAL_TYPE]);
         }
 
         foreach ($this->orderRequestBuilderPool->getOrderRequestBuilders() as $orderRequestBuilder) {
