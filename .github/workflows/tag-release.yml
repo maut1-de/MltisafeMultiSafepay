@@ -1,0 +1,110 @@
+name: Tag release on maut1
+
+# Every push to maut1 becomes an installable release, tagged to match composer.json's "version"
+# field exactly (Composer silently skips a tag whose name doesn't match the version in
+# composer.json at that commit — see docs/updates/mltsafeMultiSafepay-update-4.2.0--4.3.0.md in
+# the shop repo). This only ever creates a tag here; the shop repo still requires an explicit
+# `composer require multisafepay/shopware6:<tag>` bump to actually consume it.
+#
+# Version scheme: X.Y.Z.W, where X.Y.Z mirrors upstream's own package version (master's
+# composer.json, 3 segments) and W is our own patch counter on top of it (maut1's composer.json,
+# 4 segments).
+#
+# Two cases, detected from composer.json's version *shape* at HEAD's parents rather than by
+# chasing branch history (robust to how the merge was performed):
+#   - A merge commit where one parent's composer.json version has 3 segments (i.e. mirrors
+#     master's scheme) -> this is a "merge master into maut1" update. Reset the base to that
+#     upstream X.Y.Z and start the patch counter at .1 (or the next free one).
+#   - Anything else -> keep the current X.Y.Z, bump the trailing W by 1. If composer.json's
+#     version was already bumped by hand and isn't tagged yet (e.g. as part of resolving a
+#     master-merge's conflicts), tag it as-is instead of bumping further.
+# In both cases composer.json is corrected to match before tagging, so the "tag == version" rule
+# always holds regardless of what a human did or didn't update by hand.
+
+on:
+  push:
+    branches: [maut1]
+
+concurrency:
+  group: tag-maut1-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    # Defense in depth: the default GITHUB_TOKEN already doesn't retrigger workflows on its own
+    # pushes, but skip explicitly too in case this ever runs with a PAT instead.
+    if: "!contains(github.event.head_commit.message, 'ci: bump version to')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: maut1
+          fetch-depth: 0
+
+      - name: Determine and apply release version
+        run: |
+          set -euo pipefail
+
+          version_of() {
+            git show "$1:composer.json" | jq -r '.version'
+          }
+
+          segments_of() {
+            awk -F. '{print NF}' <<< "$1"
+          }
+
+          parents=($(git log -1 --pretty=%P HEAD))
+          master_base=""
+
+          if [ "${#parents[@]}" -eq 2 ]; then
+            three_segment_count=0
+            for parent in "${parents[@]}"; do
+              v=$(version_of "$parent")
+              if [ "$(segments_of "$v")" = "3" ]; then
+                three_segment_count=$((three_segment_count + 1))
+                master_base="$v"
+              fi
+            done
+            # Require exactly one 3-segment parent - if both (or neither) side looks like
+            # master's scheme it's ambiguous, so fall through to the normal path below rather
+            # than guess.
+            if [ "$three_segment_count" -ne 1 ]; then
+              master_base=""
+            fi
+          fi
+
+          if [ -n "$master_base" ]; then
+            echo "Detected a master merge (upstream base $master_base) -> resetting patch counter."
+            w=1
+            while git rev-parse -q --verify "refs/tags/${master_base}.${w}" >/dev/null 2>&1; do
+              w=$((w + 1))
+            done
+            new_version="${master_base}.${w}"
+          else
+            current_version=$(jq -r '.version' composer.json)
+            if git rev-parse -q --verify "refs/tags/${current_version}" >/dev/null 2>&1; then
+              parts=(${current_version//./ })
+              last=$(( ${#parts[@]} - 1 ))
+              parts[$last]=$(( parts[$last] + 1 ))
+              new_version=$(IFS=.; echo "${parts[*]}")
+            else
+              new_version="$current_version"
+            fi
+          fi
+
+          echo "Target version: $new_version"
+
+          current_in_file=$(jq -r '.version' composer.json)
+          if [ "$current_in_file" != "$new_version" ]; then
+            sed -E -i "s/(\"version\": \")[^\"]+(\")/\1${new_version}\2/" composer.json
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -am "ci: bump version to ${new_version}"
+            git push origin HEAD:maut1
+          fi
+
+          git tag "$new_version"
+          git push origin "refs/tags/${new_version}"
