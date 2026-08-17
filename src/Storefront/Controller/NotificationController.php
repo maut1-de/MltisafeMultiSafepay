@@ -195,6 +195,10 @@ class NotificationController extends StorefrontController
             return $response->setContent('NG');
         }
 
+        // Maut1: first() here relies on OrderUtil::getOrderFromNumber() sorting the
+        // transactions association by createdAt DESC — an order can carry several
+        // order_transactions (one per retry), and without that sort this would pick an
+        // arbitrary one instead of the attempt this notification is actually about.
         $transaction = $getTransactions->first();
         $transactionId = $transaction->getId();
 
@@ -264,6 +268,9 @@ class NotificationController extends StorefrontController
             return $response->setContent('NG');
         }
 
+        // Maut1: see notification() above — relies on OrderUtil::getOrderFromNumber()'s
+        // createdAt DESC sort to resolve the attempt this notification is about, not an
+        // arbitrary order_transaction.
         $shopwareTransaction = $getTransactions->first();
         if (is_null($shopwareTransaction)) {
             return $response->setContent('NG');

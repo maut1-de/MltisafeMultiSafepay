@@ -16,6 +16,7 @@ use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\DataAbstractionLayer\Exception\InconsistentCriteriaIdsException;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Sorting\FieldSorting;
 use Shopware\Core\System\Country\Aggregate\CountryState\CountryStateEntity;
 
 class OrderUtil
@@ -55,6 +56,13 @@ class OrderUtil
     /**
      *  Get the order from the order number
      *
+     * Maut1: an order can carry multiple order_transactions (each retry via
+     * MauteinsPaymentChanger creates or reopens one — see NotificationController, which relies
+     * on this method's transactions association returning the newest attempt first). Sort
+     * explicitly; a to-many association has no guaranteed order otherwise, and $order->getPrimaryOrderTransaction()
+     * is not reliable here because MauteinsPaymentChanger's SetPaymentOrderRouteChanger does not
+     * keep primaryOrderTransactionId in sync when it creates a new transaction.
+     *
      * @param string $orderNumber
      * @return OrderEntity
      */
@@ -62,6 +70,9 @@ class OrderUtil
     {
         $criteria = (new Criteria())->addFilter(new EqualsFilter('orderNumber', $orderNumber))
             ->addAssociation('transactions');
+
+        $criteria->getAssociation('transactions')
+            ->addSorting(new FieldSorting('createdAt', FieldSorting::DESCENDING));
 
         return $this->orderRepository->search($criteria, Context::createDefaultContext())->first();
     }
