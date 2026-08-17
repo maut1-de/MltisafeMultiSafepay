@@ -20,6 +20,7 @@ use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\EntitySearchResult;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Sorting\FieldSorting;
 use Shopware\Core\Framework\Uuid\Uuid;
 use Shopware\Core\System\Country\Aggregate\CountryState\CountryStateEntity;
 use stdClass;
@@ -83,6 +84,40 @@ class OrderUtilTest extends TestCase
         $result = $this->orderUtil->getOrderFromNumber($orderNumber);
 
         self::assertSame($order, $result);
+    }
+
+    /**
+     * Maut1 / #1235 (Folgeticket #1179): an order can carry multiple order_transactions (one
+     * per MauteinsPaymentChanger retry). NotificationController relies on the "transactions"
+     * association here being sorted newest-first so its first() resolves the attempt the
+     * notification is actually about, instead of an arbitrary one.
+     *
+     * @throws Exception
+     */
+    public function testGetOrderFromNumberSortsTransactionsNewestFirst(): void
+    {
+        $orderNumber = '10000';
+
+        $searchResult = $this->createMock(EntitySearchResult::class);
+        $searchResult->method('first')->willReturn(new OrderEntity());
+
+        $this->orderRepository->expects(self::once())
+            ->method('search')
+            ->with(
+                self::callback(function (Criteria $criteria) {
+                    $association = $criteria->getAssociation('transactions');
+                    $sortings = $association->getSorting();
+
+                    return count($sortings) === 1
+                        && $sortings[0] instanceof FieldSorting
+                        && $sortings[0]->getField() === 'createdAt'
+                        && $sortings[0]->getDirection() === FieldSorting::DESCENDING;
+                }),
+                self::isInstanceOf(Context::class)
+            )
+            ->willReturn($searchResult);
+
+        $this->orderUtil->getOrderFromNumber($orderNumber);
     }
 
     /**
